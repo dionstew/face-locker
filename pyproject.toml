@@ -1,0 +1,9 @@
+[project]
+name = "face-locker"
+version = "0.1.0"
+description = "Offline touchscreen face access manager for Raspberry Pi"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

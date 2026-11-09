@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+models/*.onnx
+*.sqlite3*
+*.sock
+*.log
+artifacts/
+
+# Local environments, credentials, and tool state
+.env
+.env.*
+!.env.example
+.aws/
+.codex/
+.agents/
+*.pem
+*.key
+.DS_Store
+
+# Runtime/biometric data and incomplete model downloads
+data/
+models/*.download
+/core
+/core.*
+*.core

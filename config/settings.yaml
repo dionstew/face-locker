@@ -1,0 +1,39 @@
+# Paths to models are relative to the project root for this file.
+state_dir: "~/.local/share/face-locker"
+timezone: Asia/Jakarta
+
+# External controller's serial port. Prefer /dev/serial/by-id/... for USB adapters.
+serial_port: /dev/serial0
+baudrate: 115200
+lock_id: 1
+unlock_ms: 3000
+ack_timeout: 2.0
+telemetry_timeout: 6.0
+
+scan_timeout: 15.0
+enrollment_timeout: 45.0
+result_seconds: 5.0
+consistent_frames: 3
+enrollment_samples: 5
+min_face_pixels: 90
+min_sharpness: 60.0
+
+# Starting values only: calibrate false accepts/rejects on your installation.
+match_threshold: 0.50
+match_margin: 0.08
+detector_model: models/face_detection_yunet_2023mar.onnx
+recognizer_model: models/face_recognition_sface_2021dec.onnx
+
+# Observation mode is the default. No real unlock commands are sent.
+# To commission: calibrate recognition, supply/test a compatible PAD model,
+# verify controller timing/sensors, and then explicitly enable unlocking.
+unlock_enabled: false
+pad_model: ""
+pad_size: 128
+pad_real_index: 1
+pad_logits: true
+pad_threshold: 0.95
+
+# Optional writable sysfs brightness file for your display, e.g.
+# /sys/class/backlight/<device>/brightness. Empty = black touch-to-wake overlay.
+backlight_path: ""

@@ -1,0 +1,18 @@
+# User service: place in ~/.config/systemd/user/, not /etc/systemd/system/.
+# Started by desktop autostart after importing the graphical environment.
+[Unit]
+Description=Face Locker touchscreen interface
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/face-locker
+ExecStart=%h/face-locker/.venv/bin/python %h/face-locker/app.py
+Restart=always
+RestartSec=3
+TimeoutStopSec=8
+
+[Install]
+WantedBy=graphical-session.target

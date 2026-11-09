@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Face Locker
+Comment=Start the touchscreen app after the desktop is ready
+Exec=sh -c "systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_RUNTIME_DIR; systemctl --user start face-locker-ui.service"
+Terminal=false
+X-GNOME-Autostart-enabled=true

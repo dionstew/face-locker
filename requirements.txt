@@ -1,0 +1,7 @@
+# On Raspberry Pi, install camera/OpenCV/Qt system packages as documented.
+# This file supports desktop development with PySide6.
+PySide6>=6.6,<7
+numpy>=1.24,<3
+opencv-python>=4.8,<5
+pyserial>=3.5,<4
+PyYAML>=6,<7

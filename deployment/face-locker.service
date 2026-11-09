@@ -1,0 +1,20 @@
+[Unit]
+Description=Face Locker camera, recognition, and serial service
+After=local-fs.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pi
+SupplementaryGroups=video dialout
+WorkingDirectory=/home/pi/face-locker
+ExecStart=/home/pi/face-locker/.venv/bin/python /home/pi/face-locker/app.py --service
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=12
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

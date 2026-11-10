@@ -24,11 +24,91 @@ python3 -m venv .venv
 .venv/bin/python app.py --demo --windowed
 ```
 
-Demo mode uses a drawn camera feed, a seeded person named Alex Morgan, and an in-memory
-serial peer. It never imports Picamera2 or opens a serial port. All screens work, including
+By default, demo mode uses a drawn camera feed, a seeded person named Alex Morgan, and an in-memory
+serial peer. It never opens a real serial port. All screens work, including
 simulated successful access, unknown people, failed liveness, history, and administration.
 The demo administrator PIN is `123456`; this PIN is **never** set in hardware mode.
 Use the simulated-face selector on the Camera screen to change scenarios.
+If you have saved a real camera selection in demo mode, that selection is restored on startup;
+use `--camera demo` to explicitly return to the simulated camera.
+
+### Test a real webcam or network camera on a laptop
+
+`--demo` keeps the lock controller and voltage telemetry simulated. You can independently
+select a real camera and use real face detection/enrollment/recognition:
+
+```bash
+.venv/bin/python scripts/download_models.py
+.venv/bin/python app.py --demo --windowed --camera 0
+```
+
+`0` is normally the laptop's built-in or first webcam. Try `1` for a plugged-in USB webcam.
+On Linux you can also use `--camera /dev/video0` or a stable `/dev/v4l/by-id/...` path.
+For a direct IP-camera/phone video stream:
+
+```bash
+.venv/bin/python app.py --demo --windowed --camera 'http://192.168.1.10:8080/video'
+.venv/bin/python app.py --demo --windowed --camera 'rtsp://192.168.1.10:554/stream'
+```
+
+You can enter the source inside the app instead: **Camera → Camera source…** → choose
+**Laptop / USB webcam** or **Network stream address** → enter its index/address → **Use source**.
+Then tap **Preview camera** to check the feed without recognition. Preview does not require
+recognition weights or enrolled users, sends no unlock requests, and stops after the configured
+enrollment timeout (45 seconds by default) or Cancel/Standby.
+
+The URL must point directly to a supported video stream (for example HTTP MJPEG or RTSP),
+not the camera's browser login/dashboard page. The laptop must be able to reach it. Network
+support depends on the installed OpenCV/FFmpeg build. Close other apps using the webcam and
+grant your OS's camera permissions. A Pi ribbon camera still requires the Pi/Picamera2 interface;
+entering an address does not make a directly attached ribbon camera work on a laptop.
+
+To test recognition after checking the feed, open **Administration**, use demo PIN `123456`,
+and enroll your actual face. The synthetic Alex Morgan template is never used to recognize
+real-camera images. The demo database remains separate from the hardware database. No real
+serial commands are sent even if a real face is recognized in demo mode; this does not validate
+hardware unlocking or spoof resistance.
+
+Camera changes require standby and are saved in the device's private database, including any
+stream credentials. In hardware mode, changing/viewing camera settings requires the admin PIN.
+`--camera` overrides a saved selection for that run. If another service is already running with
+a different source, change it through the app or stop that service before restarting with
+`--camera`; the app reports the mismatch rather than silently ignoring your argument.
+
+### Linux webcam devices and permissions
+
+Linux normally exposes cameras as `/dev/video0`, `/dev/video1`, etc. A name like `/dev/camera0`
+works only if your system has created that alias/symlink; the app also accepts those aliases
+and stable `/dev/v4l/by-id/...` or `/dev/v4l/by-path/...` names. One physical webcam can expose
+multiple nodes, some for metadata rather than usable video capture.
+
+```bash
+ls -l /dev/video*
+groups
+python3 app.py --demo --windowed --camera /dev/video0
+```
+
+Use **Camera → Preview camera** to open the selected source. The GUI should run as your
+normal desktop user. The reported `cv2.setLogLevel` AttributeError is an OpenCV API compatibility
+issue, not a camera permission failure; logging setup is now optional across builds.
+Linux webcam capture explicitly uses V4L2. Missing-device, permission, and native-reader-crash
+errors are reported separately.
+
+If the device exists but the app reports no read/write permission, check its owner/group and
+ACLs. If its group is `video` and your user lacks access, an administrator can add the user:
+
+```bash
+sudo usermod -aG video "$USER"
+```
+
+Then fully log out and log in again. This changes group membership; do not run the GUI with
+`sudo` or make camera devices world-writable. If `free(): invalid pointer` persists after the
+compatibility fix, it indicates a native-library failure that needs separate diagnosis. Collect
+the OpenCV build location/version using the same Python interpreter that runs the app:
+
+```bash
+python3 -c "import cv2; print(cv2.__version__); print(cv2.__file__)"
+```
 
 For a distro installation that already has PyQt5, it can be used instead of PySide6.
 The UI prefers PySide6 when both are installed. Do not install both unnecessarily.
@@ -83,6 +163,8 @@ Configure `config/settings.yaml`:
 - `serial_port`: your external controller, such as `/dev/serial0` or a stable `/dev/serial/by-id/...`.
 - `baudrate` and `lock_id`: must match the external controller.
 - `timezone`: local calendar timezone, default `Asia/Jakarta`.
+- `camera_source`: `pi`, a quoted webcam index such as `"0"`, a device path, or a direct stream URL.
+  A selection saved from the Camera screen takes precedence over YAML; `--camera` overrides both.
 - `backlight_path`: optional writable brightness file for the installed display.
 
 For hardware UART, enable the serial hardware and disable the Linux serial console through
@@ -153,8 +235,9 @@ accepted via command-line arguments or stored as plaintext; the database stores 
 
 - **Dashboard:** Start recognition, battery voltage/freshness, controller connection, reported
   actuator/door state, and daily counts.
-- **Camera:** live preview, positioning/quality guidance, enrollment progress, start/cancel,
-  and recognition/controller outcome.
+- **Camera:** source selection, preview without recognition, positioning/quality guidance,
+  enrollment progress, start/cancel, and recognition/controller outcome. Demo mode can use
+  either a simulated camera or an actual webcam/network stream.
 - **Calendar:** select a local date to inspect access attempts and device events. Select an
   access row to see its decision reason and separately recorded controller result.
 - **Administration:** touchscreen PIN keypad, enrollment name keyboard, user list, disable,
@@ -181,8 +264,12 @@ Qt UI process ── private Unix socket ── application service
 
 The backend owns the camera, recognition models, serial port, and database. The UI polls a
 snapshot in a worker thread and receives only the latest in-memory JPEG; inference and serial
-reads never run in the GUI thread. Capture is 640×480, inference processes fresh frames without
-a backlog, and models remain loaded between sessions. Capture closes in standby.
+reads never run in the GUI thread. Pi ribbon capture is 640×480; webcam/stream frames are
+limited to 640 pixels on their longest side. Inference processes fresh frames, and models
+remain loaded between sessions. Capture closes in standby. Webcam/network capture has a
+separate reader process with a bounded latest-frame queue; open/read timeouts and forced
+reader cleanup prevent stalled streams from indefinitely blocking camera recovery. Serial
+monitoring continues while a source is opening or a frame is unavailable.
 
 The state machine is `booting → idle → scanning/enrolling → result → idle`. Authorized
 recognition produces `unlocking → accepted → completed/fault`; acceptance is not physical
@@ -205,12 +292,15 @@ archive/remove them. Calendar lists are limited to the latest 500 entries per da
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
 QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/check_demo.py
+QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/check_camera_stream.py
 ```
 
 The unit/integration suite checks access decisions, enrollment, PIN handling, calendar time
 boundaries, template deletion, restart recovery, and the real pySerial transport through a
 Linux pseudo-terminal. `check_demo.py` starts separate UI/backend processes, exercises the
 screens, simulated recognition and serial completion, and saves screenshots in `artifacts/`.
+`check_camera_stream.py` serves a local MJPEG stream and exercises real FFmpeg capture,
+source selection, preview, concurrent serial updates, saved settings, and disconnect recovery.
 These checks do not replace Pi camera, liveness, battery sensor, or physical lock commissioning.
 
 References: [Picamera2](https://www.raspberrypi.com/documentation/accessories/camera-software.html),

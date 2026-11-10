@@ -36,8 +36,12 @@ class Settings:
     unlock_enabled: bool = False
     backlight_path: str = ""
     timezone: str = "Asia/Jakarta"
+    camera_source: str = "pi"
+    camera_open_timeout: float = 3.0
+    camera_read_timeout: float = 2.0
     demo: bool = False
     _base: Path = field(default=ROOT, repr=False)
+    _camera_override: bool = field(default=False, repr=False)
 
     @property
     def state_path(self) -> Path:
@@ -59,7 +63,7 @@ class Settings:
 
     def validate(self):
         for name in ("ack_timeout", "telemetry_timeout", "scan_timeout",
-                     "enrollment_timeout", "result_seconds"):
+                     "enrollment_timeout", "result_seconds", "camera_open_timeout", "camera_read_timeout"):
             if not 0.1 <= float(getattr(self, name)) <= 3600:
                 raise ValueError(f"Invalid {name}")
         for name in ("match_threshold", "match_margin", "pad_threshold"):
@@ -73,9 +77,13 @@ class Settings:
             raise ValueError("Invalid hardware or PAD configuration")
         from zoneinfo import ZoneInfo
         ZoneInfo(self.timezone)
+        from .camera import normalize_source
+        self.camera_source = normalize_source(self.camera_source)
+        if self.camera_source == "demo" and not self.demo:
+            raise ValueError("The simulated camera is only available with --demo")
 
 
-def load_settings(path=None, *, demo=False, state_dir=None) -> Settings:
+def load_settings(path=None, *, demo=False, state_dir=None, camera_source=None) -> Settings:
     settings = Settings()
     config_path = Path(path).resolve() if path else ROOT / "config/settings.yaml"
     if config_path.exists():
@@ -103,6 +111,11 @@ def load_settings(path=None, *, demo=False, state_dir=None) -> Settings:
     settings.demo = demo
     if demo:
         settings.state_dir = "~/.local/share/face-locker-demo"
+        if settings.camera_source == "pi":
+            settings.camera_source = "demo"
+    if camera_source is not None:
+        settings.camera_source = camera_source
+        settings._camera_override = True
     if state_dir:
         settings.state_dir = state_dir
     settings.validate()

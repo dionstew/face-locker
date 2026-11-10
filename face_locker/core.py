@@ -5,10 +5,12 @@ import logging
 import secrets
 import threading
 import time
+from dataclasses import replace
 
+from .camera import describe_source, normalize_source, source_key
 from .serial_service import SerialService
 from .storage import Database
-from .vision import DemoVision, PiVision, best_match
+from .vision import DemoVision, PiVision, Observation, best_match
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +19,11 @@ class ApplicationService:
     def __init__(self, settings):
         self.settings = settings
         self.db = Database(settings.state_path / "locker.sqlite3")
+        saved_source = self.db.get_setting("camera_source")
+        if saved_source and not settings._camera_override:
+            source = normalize_source(saved_source)
+            if source != "demo" or settings.demo:
+                settings.camera_source = source
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.serial = SerialService(settings, self._hardware_event)
@@ -35,6 +42,8 @@ class ApplicationService:
         self.pin_blocked_until = 0.0
         self.last_telemetry_saved = 0.0
         self.demo_scenario = "known"
+        self.camera_revision = 0
+        self.camera_changed = threading.Event()
         self.thread = threading.Thread(target=self._vision_loop, name="vision-worker", daemon=True)
         if settings.demo and not self.db.has_pin():
             self.db.set_pin("123456")
@@ -46,6 +55,7 @@ class ApplicationService:
 
     def stop(self):
         self.stop_event.set()
+        self.camera_changed.set()
         with self.lock:
             self._cancel("Service stopped")
         self.thread.join(timeout=5)
@@ -97,6 +107,28 @@ class ApplicationService:
             if command == "scan":
                 self._begin("scan")
                 return {}
+            if command == "preview":
+                self._begin("preview")
+                return {}
+            if command in ("camera_settings", "configure_camera"):
+                if not self.settings.demo:
+                    self._require_admin(request.get("token"))
+                if command == "camera_settings":
+                    return {"source": self.settings.camera_source}
+                if self.session or self.serial.snapshot()["pending"] or self.state == "unlocking":
+                    raise RuntimeError("Enter standby before changing the camera source")
+                source = normalize_source(request.get("source"))
+                if source == "demo" and not self.settings.demo:
+                    raise ValueError("The simulated camera is only available with --demo")
+                self.db.set_setting("camera_source", source)
+                self.settings.camera_source = source
+                self.camera_revision += 1
+                self.camera_changed.set()
+                self.vision, self.frame = None, None
+                self.vision_error = "Loading camera source…"
+                self.state, self.message = "booting", "Loading camera source…"
+                self.db.event("camera", "source_changed", describe_source(source))
+                return {}
             if command == "standby":
                 self._cancel("Standby · tap Start recognition when ready")
                 return {}
@@ -140,6 +172,8 @@ class ApplicationService:
             raise RuntimeError("An operation is already in progress")
         if not self.vision or self.vision_error:
             raise RuntimeError(self.vision_error or "Camera is not ready")
+        if kind != "preview" and getattr(self.vision, "recognition_error", ""):
+            raise RuntimeError(self.vision.recognition_error)
         if kind == "scan" and not self.templates:
             raise RuntimeError("No enrolled users. Open Administration to enroll someone.")
         session_id = secrets.token_hex(16)
@@ -148,8 +182,8 @@ class ApplicationService:
         self.session = {"id": session_id, "kind": kind, "started": time.monotonic(),
                         "candidate": None, "count": 0, "unknown": 0, "spoof": 0,
                         "samples": [], "last_sample": 0.0, "name": name, "admin_token": token}
-        self.state = "enrolling" if kind == "enroll" else "scanning"
-        self.message = "Look at the camera and hold still"
+        self.state = {"enroll": "enrolling", "scan": "scanning", "preview": "previewing"}[kind]
+        self.message = "Opening camera…" if kind == "preview" else "Look at the camera and hold still"
         self.frame = None
 
     def _cancel(self, message):
@@ -173,6 +207,11 @@ class ApplicationService:
             "state": self.state, "message": self.message, "demo": self.settings.demo,
             "camera_ready": bool(self.vision) and not self.vision_error,
             "camera_error": self.vision_error,
+            "recognition_ready": bool(self.vision) and not self.vision_error and not getattr(self.vision, "recognition_error", ""),
+            "recognition_error": getattr(self.vision, "recognition_error", ""),
+            "camera_source_label": describe_source(self.settings.camera_source),
+            "camera_source_key": source_key(self.settings.camera_source),
+            "simulated_camera": self.settings.camera_source == "demo",
             "mode": "demo" if self.settings.demo else (
                 "live" if self.settings.unlock_enabled and self.vision and self.vision.pad is not None else "observation"),
             "controller": controller, "users_count": len({t[0] for t in self.templates}),
@@ -210,15 +249,30 @@ class ApplicationService:
 
     def _vision_loop(self):
         vision = None
+        revision = -1
         while not self.stop_event.is_set():
+            with self.lock:
+                current_revision = self.camera_revision
+                camera_settings = replace(self.settings)
+            if revision != current_revision:
+                if vision:
+                    try:
+                        vision.stop()
+                    except Exception:
+                        log.exception("Previous camera close failed")
+                vision = None
+                revision = current_revision
+                self.camera_changed.clear()
             if vision is None:
                 try:
-                    vision = DemoVision(self.settings) if self.settings.demo else PiVision(self.settings)
+                    vision = DemoVision(camera_settings) if camera_settings.camera_source == "demo" else PiVision(camera_settings)
                     with self.lock:
+                        if revision != self.camera_revision:
+                            continue
                         self.vision, self.vision_error = vision, ""
                         self.model_version = vision.model_version
                         self._refresh_templates()
-                        if self.settings.demo and not self.db.users():
+                        if isinstance(vision, DemoVision) and not self.db.has_templates(vision.model_version):
                             self.db.add_user("Alex Morgan", [[1.0] + [0.0] * 127] * 5, vision.model_version)
                             self._refresh_templates()
                         self.state, self.message = "idle", "Ready when you are"
@@ -226,10 +280,13 @@ class ApplicationService:
                     with self.lock:
                         self.vision_error = str(exc)
                         self.state, self.message = "unavailable", str(exc)
-                    self.stop_event.wait(5)
+                    vision = None
+                    self.camera_changed.wait(5)
+                    self.camera_changed.clear()
                     continue
             with self.lock:
                 session_id = self.session["id"] if self.session else None
+                session_kind = self.session["kind"] if self.session else None
                 if self.state in ("success", "denied", "fault", "observed") and time.monotonic() > self.result_until:
                     self.state, self.message, self.frame = "idle", "Ready when you are", None
                 scenario = self.demo_scenario
@@ -241,11 +298,12 @@ class ApplicationService:
                 self.stop_event.wait(0.1)
                 continue
             try:
-                if self.settings.demo:
+                if isinstance(vision, DemoVision):
                     vision.scenario = scenario
                 vision.start()
                 frame = vision.capture()
-                observation = vision.analyze(frame)
+                observation = (Observation(hint="Camera preview · recognition is paused")
+                               if session_kind == "preview" else vision.analyze(frame))
                 import cv2
                 if observation.box:
                     x, y, w, h = observation.box
@@ -259,9 +317,10 @@ class ApplicationService:
             except Exception as exc:
                 log.exception("Camera/recognition error")
                 with self.lock:
-                    self.vision_error = str(exc)
-                    self._complete("fault", "Camera error: " + str(exc), "error")
-                    self.vision = None
+                    if revision == self.camera_revision and self.session and self.session["id"] == session_id:
+                        self.vision_error = str(exc)
+                        self._complete("fault", "Camera error: " + str(exc), "error")
+                        self.vision = None
                 try:
                     vision.stop()
                 except Exception:
@@ -278,11 +337,13 @@ class ApplicationService:
     def _process_observation(self, observation):
         session, cfg = self.session, self.settings
         now = time.monotonic()
-        limit = cfg.enrollment_timeout if session["kind"] == "enroll" else cfg.scan_timeout
+        limit = cfg.enrollment_timeout if session["kind"] in ("enroll", "preview") else cfg.scan_timeout
         if now - session["started"] > limit:
             self._complete("denied", "Session timed out · please try again", "timeout")
             return
         self.message = observation.hint
+        if session["kind"] == "preview":
+            return
         if observation.embedding is None:
             session["candidate"], session["count"], session["unknown"], session["spoof"] = None, 0, 0, 0
             return

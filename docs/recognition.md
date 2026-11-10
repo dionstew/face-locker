@@ -2,8 +2,9 @@
 
 ## Pipeline
 
-The worker loads YuNet and SFace once, then starts Picamera2 only for scanning/enrollment.
-It captures fresh 640×480 BGR frames, requires exactly one face, checks face size, brightness,
+The worker loads YuNet and SFace once, then starts the selected camera only for preview,
+scanning, or enrollment. Pi ribbon capture uses Picamera2; local webcams and HTTP/RTSP streams
+use OpenCV in a separate reader process. It captures fresh BGR frames, requires exactly one face, checks face size, brightness,
 and Laplacian sharpness, aligns landmarks, and produces a normalized SFace embedding.
 
 Compare embeddings by cosine similarity. The best score for each person is the maximum

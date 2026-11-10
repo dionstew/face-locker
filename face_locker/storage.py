@@ -94,6 +94,11 @@ class Database:
                 "SELECT u.id,u.name,f.embedding FROM users u JOIN face_templates f ON u.id=f.user_id "
                 "WHERE u.active=1 AND f.model_version=?", (model_version,))]
 
+    def has_templates(self, model_version):
+        with self.lock:
+            return self.connection.execute("SELECT 1 FROM face_templates WHERE model_version=? LIMIT 1",
+                                           (model_version,)).fetchone() is not None
+
     def active(self, user_id):
         with self.lock:
             row = self.connection.execute("SELECT active FROM users WHERE id=?", (user_id,)).fetchone()
@@ -187,6 +192,15 @@ class Database:
     def has_pin(self):
         with self.lock:
             return self.connection.execute("SELECT 1 FROM settings WHERE key='admin_pin'").fetchone() is not None
+
+    def get_setting(self, key):
+        with self.lock:
+            row = self.connection.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            return row[0] if row else None
+
+    def set_setting(self, key, value):
+        with self.lock, self.connection:
+            self.connection.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
 
     def verify_pin(self, pin):
         with self.lock:

@@ -18,14 +18,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Offline Raspberry Pi face access manager")
     parser.add_argument("--config", help="Settings YAML (default: config/settings.yaml)")
     parser.add_argument("--state-dir", help="Override private database/socket directory")
-    parser.add_argument("--demo", action="store_true", help="Simulated camera and serial transport; never opens hardware")
+    parser.add_argument("--demo", action="store_true", help="Simulated lock/telemetry; camera is simulated unless another source is selected")
+    parser.add_argument("--camera", help="Camera source: pi, demo, webcam index (0), /dev/video0, or HTTP/RTSP stream URL")
     parser.add_argument("--service", action="store_true", help="Run only the background application/serial service")
     parser.add_argument("--standalone", action="store_true", help="Start a private child service if one is not running")
     parser.add_argument("--windowed", action="store_true", help="Windowed UI instead of fullscreen kiosk")
     parser.add_argument("--set-admin-pin", action="store_true", help="Set administrator PIN interactively; service must be stopped")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    settings = load_settings(args.config, demo=args.demo, state_dir=args.state_dir)
+    settings = load_settings(args.config, demo=args.demo, state_dir=args.state_dir, camera_source=args.camera)
     settings.prepare()
     if args.set_admin_pin:
         import fcntl
@@ -62,10 +63,16 @@ def main(argv=None):
             status = client.call("status")
             if status["demo"] != settings.demo:
                 raise RuntimeError("Existing service mode differs from the requested mode")
+            if args.camera is not None:
+                from face_locker.camera import source_key
+                if status.get("camera_source_key") != source_key(settings.camera_source):
+                    raise RuntimeError("A service with a different camera is already running. Change Camera source in the app, or stop that service first.")
         except (OSError, TimeoutError):
             command = [sys.executable, str(Path(__file__).resolve()), "--service", "--state-dir", str(settings.state_path)]
             if args.demo:
                 command.append("--demo")
+            if args.camera is not None:
+                command.extend(["--camera", settings.camera_source])
             if args.config:
                 command.extend(["--config", str(Path(args.config).resolve())])
             child = subprocess.Popen(command)

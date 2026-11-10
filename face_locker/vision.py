@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import hashlib
 import time
 
+from .camera import OpenCVCamera, RibbonCamera
+
 
 @dataclass
 class Observation:
@@ -14,39 +16,38 @@ class Observation:
 
 
 class PiVision:
-    """Owned exclusively by the vision thread. Frames are BGR for OpenCV."""
+    """Real-camera recognition, owned exclusively by the vision thread."""
     def __init__(self, settings):
         import cv2
         import numpy as np
         self.cv2, self.np, self.settings = cv2, np, settings
+        self.camera = None
+        self.pad = None
+        self.model_version = ""
+        self.recognition_error = ""
         if tuple(map(int, cv2.__version__.split(".")[:2])) < (4, 8):
-            raise RuntimeError("OpenCV 4.8 or newer is required for the bundled YuNet model")
+            self.recognition_error = "OpenCV 4.8 or newer is required for the bundled YuNet model"
+            return
         detector = settings.model_path(settings.detector_model)
         recognizer = settings.model_path(settings.recognizer_model)
         for path in (detector, recognizer):
             if not path.is_file():
-                raise RuntimeError(f"Model missing: {path.name}. Run scripts/download_models.py")
+                self.recognition_error = f"Model missing: {path.name}. Run scripts/download_models.py and restart the service."
+                return
         self.detector = cv2.FaceDetectorYN.create(str(detector), "", (640, 480), 0.9, 0.3, 5000)
         self.recognizer = cv2.FaceRecognizerSF.create(str(recognizer), "")
         self.model_version = "sface:" + hashlib.sha256(recognizer.read_bytes()).hexdigest()[:16]
-        self.pad = None
         if settings.pad_model:
             self.pad = cv2.dnn.readNetFromONNX(str(settings.model_path(settings.pad_model)))
-        self.camera = None
 
     def start(self):
         if self.camera is not None:
             return
-        from picamera2 import Picamera2
-        camera = Picamera2()
+        camera = RibbonCamera(self.settings) if self.settings.camera_source == "pi" else OpenCVCamera(self.settings)
         try:
-            # Picamera2 RGB888 yields byte-order BGR, matching OpenCV's array convention.
-            camera.configure(camera.create_video_configuration(
-                main={"size": (640, 480), "format": "RGB888"},
-                controls={"FrameRate": 15}, buffer_count=3))
             camera.start()
         except Exception:
-            camera.close()
+            camera.stop()
             raise
         self.camera = camera
         self._warm_until = time.monotonic() + 1.0
@@ -54,15 +55,14 @@ class PiVision:
     def stop(self):
         camera, self.camera = self.camera, None
         if camera:
-            try:
-                camera.stop()
-            finally:
-                camera.close()
+            camera.stop()
 
     def capture(self):
-        return self.camera.capture_array("main")
+        return self.camera.read()
 
     def analyze(self, frame):
+        if getattr(self, "recognition_error", ""):
+            raise RuntimeError(self.recognition_error)
         cv2, np, cfg = self.cv2, self.np, self.settings
         if time.monotonic() < self._warm_until:
             return Observation(hint="Adjusting camera exposure…")

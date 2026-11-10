@@ -2,6 +2,13 @@
 state_dir: "~/.local/share/face-locker"
 timezone: Asia/Jakarta
 
+# pi = ribbon camera, "0" = laptop/USB webcam, or a direct HTTP(S)/RTSP(S) stream.
+# Camera-screen selections are saved privately and take precedence at next startup.
+# --camera explicitly overrides a saved selection for that run.
+camera_source: pi
+camera_open_timeout: 3.0
+camera_read_timeout: 2.0
+
 # External controller's serial port. Prefer /dev/serial/by-id/... for USB adapters.
 serial_port: /dev/serial0
 baudrate: 115200

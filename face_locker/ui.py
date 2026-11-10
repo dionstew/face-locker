@@ -6,6 +6,7 @@ import queue
 import time
 from zoneinfo import ZoneInfo
 
+from .camera import normalize_source
 from .display import Backlight
 from .ipc import Client
 from .qt import Qt, QtCore, QtGui, QtWidgets as W, Signal
@@ -134,29 +135,38 @@ class ServiceWorker(QtCore.QThread):
 
 
 class TouchInput(W.QDialog):
-    def __init__(self, title, *, secret=False, parent=None):
+    def __init__(self, title, *, secret=False, address=False, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(420 if secret else 640)
         layout = W.QVBoxLayout(self)
         layout.addWidget(label(title, "title"))
         self.input = W.QLineEdit()
-        self.input.setMaxLength(12 if secret else 60)
+        self.input.setMaxLength(12 if secret else 2048 if address else 60)
         if secret:
             self.input.setEchoMode(W.QLineEdit.Password)
         self.input.returnPressed.connect(self.accept)
         layout.addWidget(self.input)
         rows = ["123", "456", "789", "0"] if secret else ["1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
+        if address:
+            rows = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm", ":/._-@?=&%+#"]
+        letter_keys = []
         for chars in rows:
             row = W.QHBoxLayout()
             for char in chars:
                 key = button(char, lambda checked=False, c=char: self.input.insert(c))
                 key.setMinimumWidth(32)
+                if char.isalpha():
+                    letter_keys.append(key)
+                    key.clicked.disconnect()
+                    key.clicked.connect(lambda checked=False, k=key: self.input.insert(k.text()))
                 row.addWidget(key)
             layout.addLayout(row)
         actions = W.QHBoxLayout()
         if not secret:
             actions.addWidget(button("Space", lambda: self.input.insert(" ")))
+        if address:
+            actions.addWidget(button("Shift", lambda: [key.setText(key.text().swapcase()) for key in letter_keys]))
         actions.addWidget(button("⌫", self.input.backspace))
         actions.addWidget(button("Cancel", self.reject))
         actions.addWidget(button("Continue", self.accept, "primary"))
@@ -164,10 +174,74 @@ class TouchInput(W.QDialog):
         self.input.setFocus()
 
     @classmethod
-    def get(cls, title, parent, secret=False):
-        dialog = cls(title, secret=secret, parent=parent)
+    def get(cls, title, parent, secret=False, address=False, initial=""):
+        dialog = cls(title, secret=secret, address=address, parent=parent)
+        dialog.input.setText(initial)
         accepted = dialog.exec() == W.QDialog.Accepted
         return dialog.input.text(), accepted
+
+
+class CameraSourceDialog(W.QDialog):
+    def __init__(self, source, demo, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Camera source")
+        self.setMinimumWidth(510)
+        layout = W.QVBoxLayout(self)
+        layout.addWidget(label("Camera source", "title"))
+        self.kind = W.QComboBox()
+        for text, value in (("Laptop / USB webcam", "webcam"), ("Network stream address", "network"),
+                            ("Raspberry Pi ribbon camera", "pi")):
+            self.kind.addItem(text, value)
+        if demo:
+            self.kind.addItem("Simulated camera", "demo")
+        layout.addWidget(self.kind)
+        self.address = W.QLineEdit()
+        self.address.setMaxLength(2048)
+        row = W.QHBoxLayout()
+        row.addWidget(self.address, 1)
+        self.keyboard_button = button("Keyboard", self.keyboard)
+        row.addWidget(self.keyboard_button)
+        layout.addLayout(row)
+        layout.addWidget(label("Webcams use an index such as 0 or 1. Network cameras need a direct video stream URL, not their web dashboard.", "muted", True))
+        layout.addWidget(label("The source is saved on this device. Demo mode always keeps the lock controller simulated.", "muted", True))
+        actions = W.QHBoxLayout()
+        actions.addWidget(button("Cancel", self.reject))
+        actions.addWidget(button("Use source", self.validate_source, "primary"))
+        layout.addLayout(actions)
+        selected = source if source in ("pi", "demo") else "webcam" if source.isdigit() or source.startswith("/dev/") else "network"
+        self.kind.setCurrentIndex(self.kind.findData(selected))
+        self.kind.currentIndexChanged.connect(self.update_kind)
+        self.update_kind()
+        if source not in ("pi", "demo"):
+            self.address.setText(source)
+
+    def update_kind(self):
+        kind = self.kind.currentData()
+        editable = kind in ("webcam", "network")
+        self.address.setVisible(editable)
+        self.keyboard_button.setVisible(editable)
+        self.address.clear()
+        self.address.setPlaceholderText("0 (try 1 for an external webcam)" if kind == "webcam" else "rtsp://192.168.1.10:554/stream or http://192.168.1.10:8080/video")
+        if kind == "webcam":
+            self.address.setText("0")
+
+    def keyboard(self):
+        text, accepted = TouchInput.get("Camera index or stream address", self, address=True, initial=self.address.text())
+        if accepted:
+            self.address.setText(text)
+
+    def validate_source(self):
+        kind = self.kind.currentData()
+        try:
+            source = normalize_source(kind if kind in ("pi", "demo") else self.address.text())
+            is_network = source.startswith(("http://", "https://", "rtsp://", "rtsps://"))
+            if kind == "network" and not is_network or kind == "webcam" and (is_network or source in ("pi", "demo")):
+                raise ValueError("Enter a source matching the selected camera type")
+        except ValueError as exc:
+            W.QMessageBox.warning(self, "Camera source", str(exc))
+            return
+        self.source = source
+        self.accept()
 
 
 class CameraView(W.QLabel):
@@ -237,6 +311,7 @@ class MainWindow(W.QMainWindow):
         self.last_frame_id = -1
         self.history_dirty = True
         self.connected = False
+        self.pending_camera_settings = False
         self.backlight = Backlight(settings.backlight_path)
         self.setWindowTitle("Face Locker")
         self.setMinimumSize(800, 480)
@@ -345,7 +420,14 @@ class MainWindow(W.QMainWindow):
         page = W.QWidget()
         layout = W.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(label("Face recognition", "title"))
+        header = W.QHBoxLayout()
+        header.addWidget(label("Face recognition", "title"))
+        header.addStretch()
+        self.source_button = button("Camera source…", self.choose_camera)
+        header.addWidget(self.source_button)
+        layout.addLayout(header)
+        self.source_label = label("", "muted", True)
+        layout.addWidget(self.source_label)
         row = W.QHBoxLayout()
         self.camera_view = CameraView()
         row.addWidget(self.camera_view, 1)
@@ -361,9 +443,12 @@ class MainWindow(W.QMainWindow):
         side.addStretch()
         self.camera_start = button("Start recognition", self.start_scan, "primary")
         side.addWidget(self.camera_start)
+        self.preview_button = button("Preview camera", lambda: self.worker.submit("preview"))
+        side.addWidget(self.preview_button)
         side.addWidget(button("Cancel / standby", self.standby))
         if self.settings.demo:
-            side.addWidget(label("SIMULATED FACE", "eyebrow"))
+            self.scenario_label = label("SIMULATED FACE", "eyebrow")
+            side.addWidget(self.scenario_label)
             self.scenario = W.QComboBox()
             for text, value in (("Enrolled person", "known"), ("Unknown person", "unknown"),
                                 ("Liveness failure", "spoof"), ("No face", "no_face")):
@@ -429,7 +514,7 @@ class MainWindow(W.QMainWindow):
         login_layout.addWidget(self.admin_explanation)
         login_layout.addWidget(button("Enter administrator PIN", self.login, "primary"))
         if self.settings.demo:
-            login_layout.addWidget(label("Demo PIN: 123456 · simulated hardware only", "muted"))
+            login_layout.addWidget(label("Demo PIN: 123456 · simulated lock controller", "muted"))
         login_layout.addStretch()
         self.admin_pages.addWidget(login)
         manage = W.QWidget()
@@ -480,6 +565,13 @@ class MainWindow(W.QMainWindow):
     def start_scan(self):
         self.worker.submit("scan")
 
+    def choose_camera(self):
+        if not self.settings.demo and not self.token:
+            self.pending_camera_settings = True
+            self.login()
+        else:
+            self.worker.submit("camera_settings", token=self.token)
+
     def standby(self):
         self.worker.submit("standby")
 
@@ -487,6 +579,8 @@ class MainWindow(W.QMainWindow):
         pin, accepted = TouchInput.get("Administrator PIN", self, secret=True)
         if accepted:
             self.worker.submit("login", pin=pin)
+        else:
+            self.pending_camera_settings = False
 
     def logout(self):
         if self.token:
@@ -541,11 +635,22 @@ class MainWindow(W.QMainWindow):
         self.latest, self.connected = status, True
         state = status["state"]
         mode = status["mode"]
-        self.mode_chip.setText({"demo": "DEMO · SIMULATED", "observation": "OBSERVATION", "live": "LOCAL · LIVE"}[mode])
+        self.mode_chip.setText({"demo": "DEMO · SIMULATED" if status.get("simulated_camera", True) else "DEMO · REAL CAMERA",
+                               "observation": "OBSERVATION", "live": "LOCAL · LIVE"}[mode])
         self.notice.setText(status["message"])
-        ready = status["camera_ready"] and state not in ("scanning", "enrolling", "unlocking") and not status["controller"]["pending"]
-        self.start_button.setEnabled(ready and status["users_count"] > 0)
-        self.camera_start.setEnabled(ready and status["users_count"] > 0)
+        busy = state in ("scanning", "enrolling", "previewing", "unlocking") or bool(status["controller"]["pending"])
+        ready = status["camera_ready"] and not busy
+        recognition_ready = ready and status.get("recognition_ready", True)
+        self.start_button.setEnabled(recognition_ready and status["users_count"] > 0)
+        self.camera_start.setEnabled(recognition_ready and status["users_count"] > 0)
+        self.preview_button.setEnabled(ready)
+        self.source_button.setEnabled(not busy)
+        self.source_label.setText(status.get("camera_source_label", "") + (
+            " · " + status["recognition_error"] if status.get("recognition_error") else ""))
+        if self.settings.demo:
+            simulated = status.get("simulated_camera", True)
+            self.scenario.setVisible(simulated)
+            self.scenario_label.setVisible(simulated)
         self.ready_text.setText("●  Ready" if ready else "●  " + state.replace("_", " ").title())
         self.scan_state.setText(state.upper())
         self.camera_hint.setText(status["message"])
@@ -579,7 +684,7 @@ class MainWindow(W.QMainWindow):
                 self.refresh_history()
 
     def on_response(self, command, data):
-        if command in ("scan", "enroll"):
+        if command in ("scan", "enroll", "preview"):
             self.navigate(1)
         elif command == "standby":
             self.navigate(0)
@@ -587,6 +692,17 @@ class MainWindow(W.QMainWindow):
             self.token = data["token"]
             self.admin_pages.setCurrentIndex(1)
             self.refresh_users()
+            if self.pending_camera_settings:
+                self.pending_camera_settings = False
+                self.worker.submit("camera_settings", token=self.token)
+        elif command == "camera_settings":
+            dialog = CameraSourceDialog(data["source"], self.settings.demo, self)
+            if dialog.exec() == W.QDialog.Accepted:
+                self.worker.submit("configure_camera", token=self.token, source=dialog.source)
+        elif command == "configure_camera":
+            self.last_frame_id = -1
+            self.camera_view.clear_frame()
+            self.navigate(1)
         elif command == "users":
             self.user_records = data
             self.users_table.setRowCount(len(data))
@@ -621,6 +737,8 @@ class MainWindow(W.QMainWindow):
             self.ready_text.setText("●  Unavailable")
             self.start_button.setEnabled(False)
             self.camera_start.setEnabled(False)
+            self.preview_button.setEnabled(False)
+            self.source_button.setEnabled(False)
             self.notice.setText("Local service unavailable · " + error)
             for key in ("battery", "lock", "controller"):
                 self.metrics[key][0].setText("Unavailable")

@@ -149,3 +149,36 @@ class CoreTests(unittest.TestCase):
     def test_ambiguous_match_is_rejected_per_identity(self):
         templates = [("a", "A", self.embedding), ("a", "A", self.embedding), ("b", "B", self.embedding)]
         self.assertIsNone(best_match(self.embedding, templates, .5, .08))
+
+    def test_preview_needs_no_users_and_never_creates_a_lock_request(self):
+        self.core.templates = []
+        self.core.dispatch({"command": "preview"})
+        self.assertEqual(self.core.state, "previewing")
+        self.observe(count=5)
+        self.assertEqual(self.core.state, "previewing")
+        self.assertEqual(self.core.serial.sent, [])
+        self.assertEqual(self.core.db.connection.execute("SELECT COUNT(*) FROM access_attempts").fetchone()[0], 0)
+
+    def test_camera_change_is_saved_and_requests_worker_reload(self):
+        self.core.dispatch({"command": "configure_camera", "source": "0"})
+        self.assertEqual(self.core.settings.camera_source, "0")
+        self.assertEqual(self.core.db.get_setting("camera_source"), "0")
+        self.assertEqual(self.core.camera_revision, 1)
+        self.assertIsNone(self.core.vision)
+        self.assertEqual(self.core.state, "booting")
+
+    def test_camera_change_requires_standby_and_hardware_admin(self):
+        self.scan()
+        with self.assertRaisesRegex(RuntimeError, "standby"):
+            self.core.dispatch({"command": "configure_camera", "source": "0"})
+        self.core.dispatch({"command": "standby"})
+        self.settings.demo = False
+        with self.assertRaises(PermissionError):
+            self.core.dispatch({"command": "configure_camera", "source": "0"})
+
+    def test_preview_available_but_enrollment_blocked_without_models(self):
+        self.core.vision.recognition_error = "Model missing"
+        self.core.dispatch({"command": "preview"})
+        self.core.dispatch({"command": "standby"})
+        with self.assertRaisesRegex(RuntimeError, "Model missing"):
+            self.scan()
